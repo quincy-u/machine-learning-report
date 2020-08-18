@@ -1,0 +1,267 @@
+---
+title: "Final Project"
+author: "Qinxi Yu"
+date: "22/06/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+
+rm(list = ls())
+library(NHANES)
+library(tidyverse)
+library(glmnet)
+library(car)
+library(rms)
+library(MASS)
+small.nhanes <- na.omit(NHANES[NHANES$SurveyYr=="2011_12"
+& NHANES$Age > 17,c(1,3,4,8:11,13,17,20,21,25,46,50,51,52,61)])
+small.nhanes <- as.data.frame(small.nhanes %>%
+group_by(ID) %>% filter(row_number()==1) )
+nrow(small.nhanes)
+
+## Checking whether there are any ID that was repeated. If not ##
+## then length(unique(small.nhanes$ID)) and nrow(small.nhanes) are same ##
+length(unique(small.nhanes$ID))
+
+## Create training and test set ##
+set.seed(1005530481)
+train <- small.nhanes[sample(seq_len(nrow(small.nhanes)), size = 400),]
+nrow(train)
+length(which(small.nhanes$ID %in% train$ID))
+test <- small.nhanes[!small.nhanes$ID %in% train$ID,]
+nrow(test)
+
+## Running the model ##
+### First fit a multiple linear regression ##
+model.lm <- lm( BPSysAve ~ ., data = train[, -c(1)])
+summary(model.lm)
+
+## Perform Prediction ##
+pred.y <- predict(model.lm, newdata = test, type = "response")
+
+## Prediction error ##
+mean((test$BPSysAve - pred.y)^2)
+
+## Fit a ridge penalty ##
+model.ridge <- glmnet(x = model.matrix( ~ ., data = train[,-c(1,12)]), y = train$BPSysAve, 
+                      standardize = T, alpha = 0)
+
+## Perform Prediction ##
+pred.y.ridge <- predict(model.ridge, newx = model.matrix( ~ ., data = test[,-c(1,12)]), type = "response")
+
+## Prediction error ##
+mean((test$BPSysAve - pred.y.ridge)^2)
+
+
+## Fit a LASSO penalty ##
+model.lasso <- glmnet(x = model.matrix( ~ ., data = train[,-c(1,12)]), y = train$BPSysAve
+                      , standardize = T, alpha = 1)
+
+## Perform Prediction ##
+pred.y.lasso <- predict(model.lasso, newx = model.matrix( ~ ., data = test[,-c(1,12)]), type = "response")
+## Prediction error ##
+mean((test$BPSysAve - pred.y.lasso)^2)
+
+```
+Model Diagnostics
+```{r}
+plot(model.lm$fitted.values, model.lm$residuals)
+n = nrow(train)
+p = length(model.lm$coefficients)-1
+## Check influential observations
+## Cook's distance
+D <−cooks.distance(model.lm)
+removed_cook = which(D > qf(0.5, p+1, n-p-1))
+removed_cook
+## DFFITS
+dfits <−dffits(model.lm)
+removed_dfits = which(abs(dfits) > 2∗sqrt((p+1)/n))
+removed_dfits
+## DFBETAS
+dfb <−dfbetas(model.lm)
+removed_dfb = which(abs(dfb[,1]) > 2/sqrt(n))
+removed_dfb
+## Remove the leverage points
+## Notice we do not need to removed points from "removed_cook" since 0 points were indicated by cook's distance
+removed = removed_dfits[which(names(removed_dfits) %in% names(removed_dfb))]
+train = train[-which(rownames(train) %in% names(removed)),]
+n = nrow(train)
+n
+model.lm <- lm( BPSysAve ~ ., data = train[, -c(1)])
+## Now we can verify the assumptions
+## Normality Assumption
+plot(model.lm$fitted.values, model.lm$residuals)
+qqnorm(rstudent(model.lm))
+qqline(rstudent(model.lm))
+## Homoscedasticity
+```
+Checking for the variance inflation factor (VIF)
+```{r}
+## calculate the covariance
+covariance = cor(model.matrix(model.lm))
+covariance
+## check vif
+vifs = vif(model.lm)
+vifs
+## variables with vif > 5
+which(vifs > 5)
+correlation = cor(model.matrix(model.lm))
+correlation
+## Variables that have large vif are HHincome, poverty, weight, height, BMI.
+## We can see variable SmokeNow has a small VIF
+## Since we are mainly interested in the effect of SmokeNow on response, we will not remove vairables here
+```
+Variable Selection & Shrinkage methods
+```{r}
+## Check the effect of SmokeNow on response before model selection. 
+## Add interaction variables between SmokeNOw and other numerical vairables
+model.full <- lm( BPSysAve ~ . + SmokeNow*Age + SmokeNow*Poverty + SmokeNow*Weight + SmokeNow*Height + SmokeNow*BMI + SmokeNow*SleepHrsNight, data = train[, -c(1)])
+## Fit reduced model with SmokeNow and its interaction model removed
+model.reduced <- lm(BPSysAve ~., data=train[, -c(1,17)])
+anova(model.reduced, model.full)
+$## Now we are gonna select variables
+## Based on AIC ##
+sel.var.aic <- step(model.lm, trace = 0, k = 2, direction = "both") 
+sel.var.aic<-attr(terms(sel.var.aic), "term.labels")   
+sel.var.aic
+
+## Based on BIC ##
+sel.var.bic <- step(model.lm, trace = 0, k = log(n), direction = "both") 
+sel.var.bic<-attr(terms(sel.var.bic), "term.labels")   
+sel.var.bic
+
+### LASSO selection ###
+
+## Perform cross validation to choose lambda ##
+cv.out <- cv.glmnet(x = model.matrix( ~ ., data = train[,-c(1,12)]), y = train$BPSysAve, standardize = T, alpha = 1)
+plot(cv.out)
+best.lambda <- cv.out$lambda.1se
+best.lambda
+co<-coef(cv.out, s = "lambda.1se")
+
+#Selection of the significant features(predictors)
+
+## threshold for variable selection ##
+
+thresh <- 0.00
+# select variables #
+inds<-which(abs(co) > thresh )
+variables<-row.names(co)[inds]
+sel.var.lasso<-variables[!(variables %in% '(Intercept)')]
+sel.var.lasso
+```
+Model Validation & Checking the prediction error on the test set
+```{r}
+### Cross Validation and prediction performance of AIC based selection ###
+ols.aic <- ols(BPSysAve ~ ., data = train[,which(colnames(train) %in% c(sel.var.aic, "BPSysAve"))], 
+               x=T, y=T, model = T)
+
+## 10 fold cross validation ##    
+aic.cross <- calibrate(ols.aic, method = "crossvalidation", B = 10)
+## Calibration plot ##
+#pdf("aic_cross.pdf", height = 8, width = 16)
+plot(aic.cross, las = 1, xlab = "Predicted BPSysAVE", main = "Cross-Validation calibration with AIC")
+#dev.off()
+
+## Test Error ##
+pred.aic <- predict(ols.aic, newdata = test[,which(colnames(train) %in% c(sel.var.aic, "BPSysAve"))])
+## Prediction error ##
+pred.error.AIC <- mean((test$BPSysAve - pred.aic)^2)
+
+
+### Cross Validation and prediction performance of BIC based selection ###
+ols.bic <- ols(BPSysAve ~ ., data = train[,which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))], 
+               x=T, y=T, model = T)
+
+## 10 fold cross validation ##    
+bic.cross <- calibrate(ols.bic, method = "crossvalidation", B = 10)
+## Calibration plot ##
+#pdf("bic_cross.pdf", height = 8, width = 16)
+plot(bic.cross, las = 1, xlab = "Predicted BPSysAVE", main = "Cross-Validation calibration with BIC")
+#dev.off()
+
+## Test Error ##
+pred.bic <- predict(ols.bic, newdata = test[,which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+## Prediction error ##
+pred.error.BIC <- mean((test$BPSysAve - pred.bic)^2)
+
+### Cross Validation and prediction performance of lasso based selection ###
+ols.lasso <- ols(BPSysAve ~ ., data = train[,which(colnames(train) %in% c(sel.var.lasso, "BPSysAve"))], x=T, y=T, model = T)
+
+## 10 fold cross validation ##    
+lasso.cross <- calibrate(ols.lasso, method = "crossvalidation", B = 10)
+## Calibration plot ##
+#pdf("lasso_cross.pdf", height = 8, width = 16)
+plot(lasso.cross, las = 1, xlab = "Predicted BPSysAVE", main = "Cross-Validation calibration with LASSO")
+#dev.off()
+
+## Test Error ##
+pred.lasso <- predict(ols.lasso, newdata = test[,which(colnames(train) %in% c(sel.var.lasso, "BPSysAve"))])
+## Prediction error ##
+pred.error.lasso <- mean((test$BPSysAve - pred.lasso)^2)
+
+print(c(pred.error.AIC, pred.error.BIC, pred.error.lasso))
+```
+Since we are mainly interested in prediction and pred.error.BIC is smallest. We are using model with variables selected by Bic
+```{r}
+model.newlm <- lm(BPSysAve ~ ., data = train[, which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+vif(model.newlm)
+cor(model.matrix(model.newlm))
+qqnorm(rstudent(model.newlm))
+qqline(rstudent(model.newlm))
+```
+Variable Selection & Shrinkage Method
+############################################################################################
+Now the model has predictors of gender, age, poverty. Notice gender is a binary vairable. Hence we can add interactions to check if the model fits better
+```{r}
+model.final_1 <- lm(BPSysAve ~ ., data = train[, which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+model.final_2 <- lm(BPSysAve ~ .+ Age*Gender, data = train[, which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+model.final_3 <- lm(BPSysAve ~ .+ Poverty*Gender, data = train[, which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+model.final_4 <- lm(BPSysAve ~ .+ Age*Gender +  Poverty*Gender, data = train[, which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+
+## Model selection criteria ##
+criteria <−function(model){
+  n <−length(model$residuals)
+  p <−length(model$coefficients)−1
+  RSS <−sum(model$residuals^2)
+  R2 <−summary(model)$r.squared
+  R2.adj <−summary(model)$adj.r.squared
+  AIC <−n∗log(RSS/n) + 2∗p
+  AICc <−AIC + (2∗(p+2)∗(p+3))/(n−p−1)
+  BIC <−n∗log(RSS/n) + (p+2)∗log(n)
+  res <−c(R2, R2.adj, AIC, AICc, BIC)
+  names(res) <−c("R Squared", "Adjsuted R Squared", "AIC", "AICc", "BIC")
+  return(res)
+}
+print(criteria(model.final_1))
+print(criteria(model.final_2))
+print(criteria(model.final_3))
+print(criteria(model.final_4))
+```
+Considering adjusted R^2 tend to indicate a model that may overfit the data. We will the model which is indicated by R Squared, AIC, AICc, and BIC, which is the second model, i.e., predictors of Age, Gender, Poverty and gender*Age.
+```{r}
+model.final =model.final_2
+summary(model.final)
+## Lastly we validate the final model and conduct model diagnostics
+### Cross Validation and prediction performance of final model ###
+ols.final <- ols(BPSysAve ~ . + Age*Gender, data = train[,which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))], x=T, y=T, model = T)
+
+## 10 fold cross validation ##    
+final.cross <- calibrate(ols.final, method = "crossvalidation", B = 10)
+## Calibration plot ##
+#pdf("final_cross.pdf", height = 8, width = 16)
+plot(final.cross, las = 1, xlab = "Predicted BPSysAVE", main = "Cross-Validation calibration with final model")
+#dev.off()
+## Test Error ##
+pred.final <- predict(ols.final, newdata = test[,which(colnames(train) %in% c(sel.var.bic, "BPSysAve"))])
+## Prediction error ##
+mean((test$BPSysAve - pred.final)^2)
+## Model diagnostics
+plot(model.final$fitted.values, model.final$residuals)
+qqnorm(rstudent(model.final))
+qqline(rstudent(model.final))
+```
+
